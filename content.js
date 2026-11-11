@@ -15,9 +15,27 @@ function decodeHtmlEntities(text) {
 
 }
 
-function createBrickLinkLink(setNumber, setName) {
+// Set data sources. Names come from the bundled LOCAL_SETS (sets.js, built from
+// Rebrickable's catalog dump), so lookups work even when BrickLink is down.
+const ENRICHED_CLASS = 'marstoy-set-enriched';
+const REMOTE_LOOKUP_TIMEOUT_MS = 5000;
+
+function setInfoUrl(setNumber) {
+    return `https://rebrickable.com/sets/${setNumber}-1/`;
+}
+
+// Tried in order; if all fail the original Marstoy image is restored.
+function setImageUrls(setNumber) {
+    return [
+        `https://cdn.rebrickable.com/media/sets/${setNumber}-1.jpg`,
+        `https://img.bricklink.com/ItemImage/SN/0/${setNumber}-1.png`
+    ];
+}
+
+function createSetLink(setNumber, setName) {
     const link = document.createElement('a');
-    link.href = `https://www.bricklink.com/v2/catalog/catalogitem.page?S=${setNumber}`;
+    link.href = setInfoUrl(setNumber);
+    link.dataset.marstoySet = setNumber;
     link.textContent = `(${setName})`;
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
@@ -189,24 +207,28 @@ function findLinkInsertionTarget(textNode, productCode) {
     return null;
 }
 
-// Check if any ancestor has the bricklink-enriched class
-function hasBrickLinkEnrichedAncestor(node) {
-    let current = node.parentElement;
-    while (current) {
-        if (current.classList && current.classList.contains('bricklink-enriched')) return true;
-        current = current.parentElement;
-    }
-    return false;
+// Check if any ancestor has already been enriched
+function hasEnrichedAncestor(node) {
+    return Boolean(node.parentElement?.closest(`.${ENRICHED_CLASS}`));
 }
 
-// BrickLink API functions
+// Set name lookup: bundled data first, BrickLink only for sets newer than the bundle.
 async function fetchSetName(setNumber) {
+    const localName = typeof LOCAL_SETS !== 'undefined' ? LOCAL_SETS[setNumber] : undefined;
+    if (localName) return localName;
+
     if (!setNameCache.has(setNumber)) {
         const promise = (async () => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), REMOTE_LOOKUP_TIMEOUT_MS);
             try {
                 const response = await fetch(`https://www.bricklink.com/v2/catalog/catalogitem.page?S=${setNumber}`, {
-                    redirect: 'follow'
+                    redirect: 'follow',
+                    signal: controller.signal
                 });
+                // When BrickLink is down it redirects to a maintenance page whose
+                // headings would otherwise be mistaken for a set name.
+                if (!response.ok || !response.url.includes('catalogitem.page')) return null;
                 const html = await response.text();
 
                 const titlePatterns = [
@@ -224,8 +246,10 @@ async function fetchSetName(setNumber) {
 
                 return null;
             } catch (error) {
-                console.error('Error fetching set name:', error);
+                console.warn(`BrickLink lookup failed for set ${setNumber}:`, error);
                 return null;
+            } finally {
+                clearTimeout(timer);
             }
         })();
 
@@ -235,9 +259,56 @@ async function fetchSetName(setNumber) {
     return setNameCache.get(setNumber);
 }
 
+const LAZY_IMAGE_ATTRS = ['srcset', 'data-srcset', 'data-sizes', 'sizes', 'data-src'];
+
+function swapProductImage(img, setNumber, setName) {
+    if (img.dataset.marstoySet === setNumber) return;
+
+    // Remember the original so it can be put back if no set image loads.
+    const original = { src: img.getAttribute('src'), alt: img.alt, attrs: {} };
+    for (const attr of LAZY_IMAGE_ATTRS) {
+        if (img.hasAttribute(attr)) original.attrs[attr] = img.getAttribute(attr);
+    }
+
+    const candidates = setImageUrls(setNumber);
+    let index = 0;
+
+    const restoreOriginal = () => {
+        img.onerror = null;
+        img.onload = null;
+        for (const [attr, value] of Object.entries(original.attrs)) img.setAttribute(attr, value);
+        if (original.src !== null) img.setAttribute('src', original.src);
+        img.alt = original.alt;
+    };
+
+    img.dataset.marstoySet = setNumber;
+    img.style.opacity = '1';
+    img.style.visibility = 'visible';
+    img.style.display = 'block';
+    img.style.maxWidth = '100%';
+    img.style.height = 'auto';
+
+    for (const attr of LAZY_IMAGE_ATTRS) img.removeAttribute(attr);
+    img.classList.remove('lazyautosizes', 'ls-is-cached', 'lazyloaded');
+
+    img.alt = setName;
+    img.loading = 'eager';
+    img.onload = () => {
+        img.style.opacity = '1';
+        img.style.visibility = 'visible';
+        img.style.display = 'block';
+    };
+    img.onerror = () => {
+        index += 1;
+        if (index < candidates.length) img.src = candidates[index];
+        else restoreOriginal();
+    };
+    img.src = candidates[0];
+}
+
 // --- Main Enrichment Function ---
 async function enrichTextNode(textNode) {
-    if (hasBrickLinkEnrichedAncestor(textNode)) return;
+    if (hasEnrichedAncestor(textNode)) return;
 
     const text = textNode.textContent.trim();
     if (!text) return;
@@ -251,66 +322,39 @@ async function enrichTextNode(textNode) {
         const reversedDigits = reverseString(digits);
         const setName = await fetchSetName(reversedDigits);
         if (!setName) continue;
-        
-        const brickLinkImageUrl = `https://img.bricklink.com/ItemImage/SN/0/${reversedDigits}-1.png`;
 
         const titleElement = textNode.parentElement;
         const container = findProductContainer(textNode, productCode);
         const productImages = findProductImages(container, titleElement, productCode);
 
         for (const img of productImages) {
-            img.style.opacity = '1';
-            img.style.visibility = 'visible';
-            img.style.display = 'block';
-
-            img.removeAttribute('srcset');
-            img.removeAttribute('data-srcset');
-            img.removeAttribute('data-sizes');
-            img.removeAttribute('sizes');
-            img.removeAttribute('data-src');
-            img.classList.remove('lazyautosizes', 'ls-is-cached', 'lazyloaded');
-
-            img.src = brickLinkImageUrl;
-            img.alt = setName;
-            img.loading = 'eager';
-
-            img.style.maxWidth = '100%';
-            img.style.height = 'auto';
-
-            img.onload = function () {
-                img.style.opacity = '1';
-                img.style.visibility = 'visible';
-                img.style.display = 'block';
-            };
-            img.onerror = function () {
-                img.style.display = "none";
-            };
+            swapProductImage(img, reversedDigits, setName);
         }
 
         const insertionTarget = findLinkInsertionTarget(textNode, productCode);
-        const existingSelector = `a[href*="bricklink.com"][href*="catalogitem.page?S=${reversedDigits}"]`;
+        const existingSelector = `a[data-marstoy-set="${reversedDigits}"]`;
 
         if (insertionTarget?.mode === 'after') {
             const hostParent = insertionTarget.element.parentElement;
             if (hostParent && !hostParent.querySelector(existingSelector)) {
-                const linkOnly = createBrickLinkLink(reversedDigits, setName);
+                const linkOnly = createSetLink(reversedDigits, setName);
                 linkOnly.style.marginLeft = '8px';
                 insertionTarget.element.insertAdjacentElement('afterend', linkOnly);
-                hostParent.classList.add('bricklink-enriched');
+                hostParent.classList.add(ENRICHED_CLASS);
             }
         } else if (insertionTarget?.mode === 'append') {
             if (!insertionTarget.element.querySelector(existingSelector)) {
-                const linkOnly = createBrickLinkLink(reversedDigits, setName);
+                const linkOnly = createSetLink(reversedDigits, setName);
                 linkOnly.style.marginLeft = '8px';
                 insertionTarget.element.appendChild(linkOnly);
-                insertionTarget.element.classList.add('bricklink-enriched');
+                insertionTarget.element.classList.add(ENRICHED_CLASS);
             }
         } else {
             const wrapper = document.createElement('span');
-            wrapper.className = 'bricklink-enriched';
+            wrapper.className = ENRICHED_CLASS;
             wrapper.style.display = 'inline-block';
             wrapper.appendChild(document.createTextNode(text));
-            wrapper.appendChild(createBrickLinkLink(reversedDigits, setName));
+            wrapper.appendChild(createSetLink(reversedDigits, setName));
             textNode.replaceWith(wrapper);
         }
 

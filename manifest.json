@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "Marstoy BrickLink Set Finder",
-  "version": "1.6",
-  "description": "Enhances Marstoy product codes with BrickLink set names",
+  "version": "1.7",
+  "description": "Enhances Marstoy product codes with LEGO set names (bundled Rebrickable data, BrickLink optional)",
   "browser_specific_settings": {
     "gecko": {
       "strict_min_version": "58.0"
@@ -20,7 +20,9 @@
     "*://marstoy.com/*",
     "*://www.marstoy.com/*",
     "*://www.bricklink.com/*",
-    "*://img.bricklink.com/*"
+    "*://img.bricklink.com/*",
+    "*://rebrickable.com/*",
+    "*://cdn.rebrickable.com/*"
   ],
   "content_scripts": [
     {
@@ -31,12 +33,10 @@
         "*://www.marstoy.com/*"
       ],
       "js": [
+        "sets.js",
         "content.js"
       ],
       "run_at": "document_end"
     }
-  ],
-  "web_accessible_resources": [
-    "*://img.bricklink.com/*"
   ]
-} 
+}
